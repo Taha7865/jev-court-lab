@@ -13,7 +13,7 @@ export function decodeYolo(data:ArrayLike<number>,ratio:number,width:number,heig
   }}return out;
 }
 export async function loadYolo(){
-  const ort=await import('onnxruntime-web/wasm');ort.env.wasm.numThreads=1;ort.env.wasm.wasmPaths='/onnx/';
+  const ort=await import('onnxruntime-web/wasm');ort.env.wasm.numThreads=1;ort.env.wasm.wasmPaths=new URL('/onnx/',window.location.href).href;
   const session=await ort.InferenceSession.create('/models/yolox_tiny.onnx',{executionProviders:['wasm'],graphOptimizationLevel:'all'});
   const c=document.createElement('canvas');c.width=SIZE;c.height=SIZE;const ctx=c.getContext('2d',{willReadFrequently:true})!;
   return {async detect(image:HTMLCanvasElement):Promise<Detection[]>{
