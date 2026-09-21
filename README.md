@@ -42,6 +42,7 @@ The optional built-in sample uses synthetic data with a labeled deterministic ru
 - `lib/detection-geometry.ts`: overlapping crops, coordinate restoration, tile-edge rejection, camera-cut heuristic and active-ball evidence filtering.
 - `lib/possession.ts`: causal ball-to-player association, short occlusion carry, jersey-color grouping and optional manual overrides. Association confidence is a heuristic, not calibrated accuracy.
 - `lib/court.ts`: causal frame selection, aspect-corrected image-plane geometry, strict facts and decision validation.
+- `lib/attacking-geometry.ts` and `lib/decision-policy.ts`: measured shot/drive evidence, explicit finish/open-shot/one-on-one/help-defense criteria, and causal context shared by every JEV request. See [research and limits](docs/decision-policy.md).
 - `lib/live-decisions.ts` and `hooks/use-live-jev.ts`: rate-limited automatic requests, completed-state reuse, late-response rejection and timestamp-safe display.
 - `app/api/decision/route.ts`: same-origin, bounded structured requests, provider timeouts and visible errors.
 
@@ -57,11 +58,13 @@ Gabriele Giudici's [E-BARD detection models](https://huggingface.co/GabrieleGiud
 
 Jev references: [model](https://openrouter.ai/~typesafe/jev-latest), [OpenRouter decisions example](https://openrouter.ai/docs/cookbook/building-agents/gate-tool-calls-with-jev), [TypeSafe Choice primitive](https://docs.typesafe.ai/primitives/choice).
 
-## Passing question
+## Shooting, driving and passing
 
-The question is normative: **Should the current handler release a pass now instead of shooting, driving or retaining possession?** It is not “will a pass happen?” or “will it succeed?”. A favorable pass has a visible same-team receiver, an estimated unblocked lane, and receiver space or pressure relief that makes passing preferable. Missing defenders are not proof of an open lane. The prompt explicitly says this and remains one Choice question.
+The question asks which immediate action the handler should take. SHOOT explicitly covers layups, dunks, close finishes, floaters and jump shots. The criteria favor a credible available finish or open shot over a routine extra pass. DRIVE means attacking to create an opportunity before the finish is available, including a one-on-one attack against a close defender when help does not block the route. Being at the top of the key does not by itself establish a drive; a backed-off defender can favor shooting. Passing must improve the opportunity or relieve pressure.
 
-The headline **Pass now = P(PASS_LEFT) + P(PASS_RIGHT)**. The original five probabilities remain visible and sum to one. Screen-left/right refer to the receiver's image x-coordinate relative to the handler; they do not name a receiver when several players are on that side.
+The headline and history show the highest-probability individual action. Combined passing preference remains visible as a secondary figure. All five original probabilities remain unchanged and sum to one. Screen-left/right refer to the receiver's image x-coordinate relative to the handler; they do not name a receiver when several players are on that side.
+
+The input now includes basket and defender positions, distances relative to the handler's apparent height, and possible help/traffic in a screen corridor toward the hoop. These are uncertain geometric cues, not physical shot range, court calibration or a shot-quality model. The app cannot reliably identify the top of the key, shooting readiness or defender reach. See [the policy research, implementation and evaluation limits](docs/decision-policy.md). Responses include `policy_version: shoot-drive-v2`; reload the site and reselect the clip to obtain new decisions.
 
 Lane geometry checks whether a known defender's feet lie between 8% and 92% of the handler-to-receiver segment, within 3.5% of image width. A known defender there means blocked; an unassigned player there, or no known defenders, means unknown. Otherwise the observed lane is labeled clear. This is a 2D heuristic, not physical pass completion validation. Reach, depth, pass speed, player skill, score and shot clock are not modeled. Observed-action labels allow comparing what happened, not proving the chosen action was optimal.
 
