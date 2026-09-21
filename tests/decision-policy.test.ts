@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {question,questionWithContext} from '../lib/decision-policy.ts';
+import {DECISION_POLICY_VERSION,question,questionWithContext} from '../lib/decision-policy.ts';
 import {ACTIONS,buildState,sampleClip,sampleSetup,type CourtState} from '../lib/court.ts';
 import {visibleDecision,snapshotKey} from '../lib/live-decisions.ts';
 import {baseline} from '../lib/court.ts';
@@ -17,6 +17,23 @@ test('every request carries explicit finishing, open-shot, drive and comparative
   assert.match(request.criteria.PASS_LEFT,/concrete advantage/);
   assert.match(request.criteria.PASS_RIGHT,/concrete improvement/);
   assert.match(request.instructions,/not meters, feet, arm lengths or proven layup range/);
+});
+
+test('drive priority requires a supported local one-on-one, not absent evidence or a default fallback',()=>{
+  assert.equal(DECISION_POLICY_VERSION,'shoot-drive-v3');
+  // Contract checks for the shared model question, not a live model-behavior test.
+  for(const context of [[],[state(1.75)]]){
+    const request=questionWithContext(state(2),context);
+    assert.match(request.instructions,/Prioritize DRIVE only for a supported one-on-one opportunity/);
+    assert.match(request.instructions,/local matchup, not the total number of defenders/);
+    assert.match(request.instructions,/DRIVE is not the default when a shot or pass is uncertain/);
+    assert.match(request.instructions,/If the one-on-one matchup or route is uncertain, do not rank DRIVE first/);
+    assert.match(request.instructions,/no_help_visible alone does not establish one-on-one/);
+    assert.match(request.instructions,/Current help or congestion overrides an earlier one-on-one opening/);
+    assert.match(request.criteria.DRIVE,/One-on-one is necessary, not sufficient/);
+    assert.match(request.criteria.DRIVE,/available good shot or a clearly better pass still wins/);
+    assert.match(request.criteria.DRIVE,/unassigned player who may be help/);
+  }
 });
 
 test('temporal context keeps the latest four causal observations and the new attacking evidence',()=>{

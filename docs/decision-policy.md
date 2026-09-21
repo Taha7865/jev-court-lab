@@ -1,4 +1,4 @@
-# Shoot / drive policy — shoot-drive-v2
+# Shoot / drive policy — shoot-drive-v3
 
 Researched September 21, 2026. This changes the question sent to JEV and its measured input, not the model weights. Responses retain the model's original probabilities. `policy_version` is included in server responses and exported decisions for comparison.
 
@@ -14,6 +14,8 @@ These are coaching principles, not evidence that a universal shoot-first rule is
 ## Application
 
 The shared policy in `lib/decision-policy.ts` applies to both background and replay requests. It explicitly favors an available credible finish or good open shot over an unproductive extra pass, describes the one-on-one drive read, checks for help, and requires a concrete advantage for a pass. The five response labels are unchanged.
+
+Version 3 tightens DRIVE priority at the user's request: it requires a supported local one-on-one matchup against a close/closing defender, usable space beyond them, and no second defender/help blocking the route. It does not require only one defender in the whole image. One-on-one is necessary, not sufficient; an available good shot or clearly better pass still wins. Uncertain matchups/routes, congestion, and possible unassigned help must not make DRIVE the first choice. Current help overrides an earlier opening. A nearest defender or `no_help_visible` alone is insufficient, and missing shooting-range information must not turn driving into the fallback. This is an instruction to JEV, not a deterministic matchup classifier or a post-processing probability cap; model compliance still requires evaluation.
 
 `buildState` now includes the detected/marked basket position, primary defender (nearest observed defender, not a verified matchup), defender positions and distances, distances normalized by the handler's apparent height, and possible secondary defenders, teammates and unassigned players along a projected route to the hoop. The corridor uses current-frame geometry only and is labeled as an image-plane estimate. A missing defender does not establish openness; an unassigned corridor player makes help status unknown.
 
