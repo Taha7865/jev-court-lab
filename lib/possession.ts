@@ -62,7 +62,7 @@ export function resolveSetup(clip:Clip,frame:Frame,manual:Setup,markerTime:numbe
   if(correctionTime!==undefined&&correctionTime!==frame.time)manual={handler:null,roles:{},basket:null};
   const manualHandler=manual.handler!==null&&frame.tracks.some(t=>t.kind==='player'&&t.id===manual.handler);
   const handler=manualHandler?manual.handler:auto.handler;
-  return {...auto,handler,handlerSource:manualHandler?'user_confirmed':auto.handlerSource,handlerConfidence:manualHandler?1:auto.handlerConfidence,roles:{...estimateRoles(frame,handler),...manual.roles,...(handler!==null?{[handler]:'offense' as const}:{})},rolesSource:Object.keys(manual.roles).length?'mixed':'jersey_color',basket:markerTime===frame.time&&manual.basket?manual.basket:auto.basket};
+  return {...auto,handler,handlerSource:manualHandler?(manual.handlerSource??'user_confirmed'):auto.handlerSource,handlerConfidence:manualHandler?(manual.handlerConfidence??1):auto.handlerConfidence,roles:{...estimateRoles(frame,handler),...manual.roles,...(handler!==null?{[handler]:'offense' as const}:{})},rolesSource:Object.keys(manual.roles).length?(manual.rolesSource??'mixed'):'jersey_color',basket:markerTime===frame.time&&manual.basket?manual.basket:auto.basket};
 }
 export function firstDecisionFrame(clip:Clip):Frame|undefined{
   return clip.frames.find(f=>estimatePossession(clip,f).handler!==null)??clip.frames.find(f=>f.tracks.some(t=>t.kind==='player'))??clip.frames[0];
