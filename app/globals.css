@@ -5,3 +5,5 @@
 @media(max-width:1150px) and (min-width:721px){.decision-panel{display:grid;grid-template-columns:1fr 1fr;column-gap:35px}.decision-panel>*{grid-column:2}.decision-panel>h2:first-child,.decision-panel>.eyebrow,.decision-panel>.choice-heading,.decision-panel>.small:first-of-type,.decision-panel>.probabilities,.decision-panel>.primary,.decision-panel>.full{grid-column:1}.decision-panel>.state-heading{grid-row:2}.decision-panel>.metrics{grid-row:3/7}.decision-panel>.divider{display:none}}
 @media(max-width:720px){.input-panel .drop{min-height:135px}.pipeline{display:none}.input-panel>.small{display:none}.replay-toolbar{flex-wrap:wrap}.moment-bar{flex-wrap:wrap}.event{gap:12px;flex-wrap:wrap}.event .observed-tag{width:100%}.review-controls{grid-template-columns:1fr 1fr}.brand .muted{font-size:12px}.eyebrow{font-size:11px}.tag{font-size:11px}.timeline .panel-title{align-items:start}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+.auto-summary{font-size:13px;line-height:1.65;color:var(--accent);margin:0}.corrections .review-controls{margin-top:18px}.corrections>summary{color:var(--muted)}

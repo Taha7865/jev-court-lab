@@ -10,7 +10,6 @@ export async function POST(req:Request){
     while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;if(bytes>48000){await reader.cancel();return Response.json({error:'Court state is too large.'},{status:413,headers});}chunks.push(value);}
     const merged=new Uint8Array(bytes);let off=0;for(const c of chunks){merged.set(c,off);off+=c.length;}
     let state;try{state=stateSchema.parse(JSON.parse(new TextDecoder().decode(merged)));}catch{return Response.json({error:'Invalid court state. Confirm a visible ball handler and review your tracks.'},{status:400,headers});}
-    if(!state.spacing.visible_defense||state.quality.unassigned_players)return Response.json({error:'Assign offense, defense or ignore to every visible player before evaluating.'},{status:400,headers});
     const key=req.headers.get('authorization')?.replace(/^Bearer\s+/i,'')||(env as Record<string,string>).OPENROUTER_API_KEY;
     if(!key)return Response.json({error:'Connect an OpenRouter API key to evaluate with Jev.'},{status:401,headers});
     const start=Date.now();const response=await fetch('https://openrouter.ai/api/alpha/decisions',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json','X-Title':'JEV Court Lab'},body:JSON.stringify({model:'~typesafe/jev-latest',state,questions:{decision:question}}),signal:AbortSignal.timeout(25000)});

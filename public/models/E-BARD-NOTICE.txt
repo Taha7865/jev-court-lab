@@ -1,0 +1,13 @@
+E-BARD Basketball Object Detection — YOLOv8n
+Author: Gabriele Giudici
+Source: https://huggingface.co/GabrieleGiudici/E-BARD-detection-models
+Project: https://github.com/GabrieleGiudic/E-BARD
+Model card license: Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/
+
+The author's BODD_yolov8n_0001.pt weights were converted to ONNX (opset 17,
+704×704 float32 input) for browser inference. No retraining was performed.
+Classes: basketball, hoop, player, referee.
+The original model card describes limitations for small objects and non-NBA footage.
+Built on the Ultralytics YOLOv8 architecture (AGPL-3.0):
+https://github.com/ultralytics/ultralytics

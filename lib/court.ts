@@ -2,18 +2,18 @@ import { z } from 'zod';
 export const ACTIONS = ['SHOOT', 'DRIVE', 'PASS_LEFT', 'PASS_RIGHT', 'RESET'] as const;
 export type Action = typeof ACTIONS[number];
 export type Point = { x: number; y: number };
-export type Track = { id: number; box: [number, number, number, number]; confidence: number; kind: 'player' | 'ball'; vx: number; vy: number };
-export type Frame = { time: number; tracks: Track[] };
+export type Track = { id: number; box: [number, number, number, number]; confidence: number; kind: 'player' | 'ball'; vx: number; vy: number; jersey?: [number,number,number] };
+export type Frame = { time: number; tracks: Track[]; basket?:Point|null };
 export type Clip = { duration: number; width: number; height: number; frames: Frame[]; sample: boolean };
 export type Role = 'offense' | 'defense' | 'ignore';
-export type Setup = { handler: number | null; roles: Record<number, Role>; basket: Point | null };
+export type Setup = { handler: number | null; roles: Record<number, Role>; basket: Point | null; handlerSource?:'user_confirmed'|'ball_proximity'|'recent_ball_track'; handlerConfidence?:number; rolesSource?:'user_confirmed'|'jersey_color'|'mixed' };
 const finite = z.number().finite();
 const point = z.object({x:finite.min(0).max(1),y:finite.min(0).max(1)}).strict();
 const distance = finite.min(0).max(3).nullable();
 export const stateSchema = z.object({
   schema_version:z.literal('1.0'), time_seconds:finite.min(0).max(15),
   source:z.enum(['uploaded_clip','sample_fixture']), coordinate_system:z.literal('image_width_units; x right, y down; uncalibrated perspective'),
-  ball_handler:z.number().int().positive(), handler_position:point, handler_source:z.literal('user_confirmed'),
+  ball_handler:z.number().int().positive(), handler_position:point, handler_source:z.enum(['user_confirmed','ball_proximity','recent_ball_track']), handler_confidence:finite.min(0).max(1), team_source:z.enum(['user_confirmed','jersey_color','mixed']),
   ball_detected:z.boolean(), defender_distance:distance, basket_distance:distance,
   movement:z.object({x_per_second:finite.min(-20).max(20),y_per_second:finite.min(-20).max(20),speed:finite.min(0).max(60)}).strict(),
   teammate_positions:z.array(z.object({id:z.number().int().positive(),position:point,side:z.enum(['left','right']),nearest_defender:distance,passing_lane:z.enum(['clear','blocked','unknown'])}).strict()).max(60),
@@ -36,10 +36,12 @@ export function buildState(clip: Clip, frame: Frame, setup: Setup): CourtState |
   const teammates=players.filter(t=>t.id!==h.id&&setup.roles[t.id]==='offense');
   const nearest=(p:Point)=>defenders.length?Math.min(...defenders.map(d=>dist(p,feet(d)))):null;
   const lane=(p:Point)=>{if(!defenders.length)return 'unknown' as const;const ax=hp.x,ay=hp.y*aspect,bx=p.x,by=p.y*aspect;return defenders.some(d=>{const q=feet(d);const dx=bx-ax,dy=by-ay;const u=((q.x-ax)*dx+(q.y*aspect-ay)*dy)/(dx*dx+dy*dy||1);return u>.08&&u<.92&&Math.hypot(q.x-(ax+u*dx),q.y*aspect-(ay+u*dy))<.035;})?'blocked' as const:'clear' as const;};
-  const limitations=['Image-plane distances are not physical court distances. Perspective and camera movement distort geometry.','Teams, handler and basket are user-confirmed; generic track IDs may switch during occlusion.'];
-  if(!frame.tracks.some(t=>t.kind==='ball'))limitations.push('Ball was not detected at this frame; possession is manually assigned.');
+  const limitations=['Image-plane distances are not physical court distances. Perspective and camera movement distort geometry.','Generic track IDs may switch during occlusion; camera motion is not compensated.'];
+  if(setup.rolesSource&&setup.rolesSource!=='user_confirmed')limitations.push('Teams are estimated from jersey colors; similar uniforms and occlusion can cause errors.');
+  if(setup.handlerSource&&setup.handlerSource!=='user_confirmed')limitations.push('Possession is estimated from ball proximity and recent tracks, not player identity.');
+  if(!frame.tracks.some(t=>t.kind==='ball'))limitations.push('Ball was not detected at this frame; possession uses manual or recent tracking evidence.');
   if(!setup.basket)limitations.push('Basket position is unknown.');
-  return stateSchema.parse({schema_version:'1.0',time_seconds:frame.time,source:clip.sample?'sample_fixture':'uploaded_clip',coordinate_system:'image_width_units; x right, y down; uncalibrated perspective',ball_handler:h.id,handler_position:hp,handler_source:'user_confirmed',ball_detected:frame.tracks.some(t=>t.kind==='ball'),defender_distance:nearest(hp),basket_distance:setup.basket?dist(hp,setup.basket):null,movement:{x_per_second:h.vx,y_per_second:h.vy*aspect,speed:Math.hypot(h.vx,h.vy*aspect)},teammate_positions:teammates.map(t=>({id:t.id,position:feet(t),side:feet(t).x<hp.x?'left':'right',nearest_defender:nearest(feet(t)),passing_lane:lane(feet(t))})),spacing:{mean_teammate_distance:teammates.length?teammates.reduce((a,t)=>a+dist(hp,feet(t)),0)/teammates.length:null,visible_offense:teammates.length+1,visible_defense:defenders.length},quality:{mean_detection_confidence:players.reduce((a,t)=>a+t.confidence,0)/(players.length||1),unassigned_players:players.filter(t=>t.id!==h.id&&!setup.roles[t.id]).length,limitations}});
+  return stateSchema.parse({schema_version:'1.0',time_seconds:frame.time,source:clip.sample?'sample_fixture':'uploaded_clip',coordinate_system:'image_width_units; x right, y down; uncalibrated perspective',ball_handler:h.id,handler_position:hp,handler_source:setup.handlerSource??'user_confirmed',handler_confidence:setup.handlerConfidence??1,team_source:setup.rolesSource??'user_confirmed',ball_detected:frame.tracks.some(t=>t.kind==='ball'),defender_distance:nearest(hp),basket_distance:setup.basket?dist(hp,setup.basket):null,movement:{x_per_second:h.vx,y_per_second:h.vy*aspect,speed:Math.hypot(h.vx,h.vy*aspect)},teammate_positions:teammates.map(t=>({id:t.id,position:feet(t),side:feet(t).x<hp.x?'left':'right',nearest_defender:nearest(feet(t)),passing_lane:lane(feet(t))})),spacing:{mean_teammate_distance:teammates.length?teammates.reduce((a,t)=>a+dist(hp,feet(t)),0)/teammates.length:null,visible_offense:teammates.length+1,visible_defense:defenders.length},quality:{mean_detection_confidence:players.reduce((a,t)=>a+t.confidence,0)/(players.length||1),unassigned_players:players.filter(t=>t.id!==h.id&&!setup.roles[t.id]).length,limitations}});
 }
 export function baseline(s:CourtState):Decision {
   // A transparent rules-only preview, never represented as a Jev response.
@@ -59,7 +61,7 @@ export function parseDecision(raw:unknown):Decision {
   if(a.probabilities[a.choice]+.0001<Math.max(...Object.values(a.probabilities)))throw new Error('Jev choice does not match its probabilities.');
   return {...a,model:data.model,source:'jev'};
 }
-export const question={type:'choice',instructions:'Given this frozen basketball court state, which immediate action should the confirmed ball handler take? Choose the most reasonable next action from the visible geometry only. Left/right mean screen left/right. Treat distances as image-width fractions, not feet or meters. Account for unknown ball, missing basket, camera motion and unassigned people; do not invent players, skill, shot quality, score, or a future outcome. This is a basketball judgment experiment, not a calibrated outcome predictor.',criteria:{SHOOT:'Attempt a shot now, with sufficient space from the defender and a plausible route to the marked basket.',DRIVE:'Advance with the ball toward the marked basket through available space.',PASS_LEFT:'Pass to a visible teammate on screen-left of the handler, favoring a clear lane and defender separation.',PASS_RIGHT:'Pass to a visible teammate on screen-right of the handler, favoring a clear lane and defender separation.',RESET:'Retain possession or move back to reset when the visible state supports no clear immediate advantage.'}};
+export const question={type:'choice',instructions:'Given this frozen basketball court state, which immediate action should the estimated or confirmed ball handler take? Choose the most reasonable next action from the visible geometry only. Left/right mean screen left/right. Treat distances as image-width fractions, not feet or meters. Account for unknown ball, missing basket, camera motion and unassigned people; do not invent players, skill, shot quality, score, or a future outcome. This is a basketball judgment experiment, not a calibrated outcome predictor.',criteria:{SHOOT:'Attempt a shot now, with sufficient space from the defender and a plausible route to the marked basket.',DRIVE:'Advance with the ball toward the marked basket through available space.',PASS_LEFT:'Pass to a visible teammate on screen-left of the handler, favoring a clear lane and defender separation.',PASS_RIGHT:'Pass to a visible teammate on screen-right of the handler, favoring a clear lane and defender separation.',RESET:'Retain possession or move back to reset when the visible state supports no clear immediate advantage.'}};
 export const sampleSetup:Setup={handler:4,roles:{4:'offense',7:'offense',9:'offense',2:'offense',8:'offense',11:'defense',12:'defense',13:'defense',14:'defense',15:'defense'},basket:{x:.5,y:.14}};
 export function sampleClip():Clip {
   const frames:Frame[]=[];

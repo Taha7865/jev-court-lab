@@ -1,41 +1,46 @@
 # JEV Court Lab
 
-A deliberately small basketball decision experiment: one uploaded 5–15 second possession, generic player and ball tracks, a reviewed image-plane court state, and one Jev decision at a time.
+One uploaded 5–15 second basketball possession → detected players, basketball and hoop → generic tracks → deterministic court facts → one TypeSafe Jev judgment → annotated replay and decision timeline.
 
 ## Run
 
-Requires Node 22.13+ (24 recommended). Run `npm install`, then `npm run dev` and open the printed local URL. `npm test` runs geometry, causal frame selection, tracking and decision validation checks; `npx tsc --noEmit` checks types; `npm run build` builds the deployable Worker.
-
-Connect an OpenRouter key in the interface. It stays in tab memory and is forwarded only to the app's decision endpoint and OpenRouter. It is not saved in local storage or exported. Alternatively set `OPENROUTER_API_KEY` in the local `.env` or the hosted Site's secret environment. Do not prefix it with NEXT_PUBLIC.
+Requires Node 22.13+. Run `npm install`, then `npm run dev`. `npm test` checks geometry, causal frame selection, tracking, possession estimates and decision validation. `npx tsc --noEmit` checks types; `npm run build` produces the deployable Worker.
 
 ## Use
 
-1. Upload a single continuous shot, 5–15 seconds, under 80 MB. H.264 MP4 and browser-decodable WebM work best; MOV support depends on its codec.
-2. The browser decodes frames at 4 fps and runs pretrained YOLOX Tiny at 416×416, merging duplicate boxes. We use this browser-compatible detector rather than introducing a separate GPU service for V1. No custom model is trained.
-3. Pause at a decision moment. Assign every visible person to offense, defense or ignore (spectators/referees). Confirm the ball handler. Mark the basket in this frame. A new frame requires a new basket marker because camera motion can invalidate the old one.
-4. Ask Jev. The replay freezes at the actual sampled frame; only a validated structured state is submitted to `POST https://openrouter.ai/api/alpha/decisions` using `~typesafe/jev-latest` and one Choice question.
-5. Inspect the five probabilities and immutable timeline snapshot. Reveal the continuation, label the observed action, and export JSON containing tracks, states, responses, and observations.
+1. Upload one continuous shot under 80 MB. H.264 MP4 and browser-decodable MOV/WebM work.
+2. The browser samples at 4 fps and runs the pretrained E-BARD YOLOv8n basketball detector. It distinguishes basketballs, hoops, players and referees. No custom training is performed.
+3. Ball proximity estimates possession; brief occlusions can use at most 0.5 seconds of past ball evidence. Similar jersey colors group teammates. A detected hoop supplies the basket position. The replay starts at the earliest sampled frame with a possession estimate.
+4. Connect OpenRouter. The app evaluates that frozen state automatically after upload or connection. The right panel explicitly distinguishes connection needed, uncertain possession, evaluation in progress, and actual Jev output.
+5. Seek to another moment and choose **Ask Jev**. The optional correction drawer lets you adjust a handler, role or hoop. Corrections apply to the current frame. Correcting a handler requests a fresh decision; assigning every player is no longer required.
+6. Reveal the continuation, label the observed action, and export JSON containing tracks, states, responses and observations.
 
-The built-in schematic is **synthetic data** with a clearly labeled **deterministic rules preview**. It does not claim to be detected video or Jev output. You can evaluate its structured state with real Jev after connecting a key.
+If detection finds no players, the exact uploaded video remains playable to help check that the file contains the intended footage. Missing or ambiguous ball evidence stays uncertain instead of inventing a handler.
 
-## Boundaries
+## OpenRouter
 
-- `lib/vision.ts`: lazy-loaded detector, browser frame extraction, generic class-aware motion/size matching tracker. Only actually detected objects are rendered; lost tracks are retained internally for up to 0.8 sec for reassociation.
-- `lib/court.ts`: causal frame lookup, aspect-ratio-corrected image-plane geometry, typed state schema, sample fixture, decision schema validation.
-- `app/api/decision/route.ts`: same-origin JSON endpoint with a 48 KB body cap, strict allowlisted state, timeouts and actionable provider errors. No raw frames or video are accepted. No silent substitute model or rules fallback is used for a Jev request.
-- `app/page.tsx`: upload/review/replay/decision/timeline surface. Analysis lives in memory; JSON export is explicit. Reloading clears uploaded clips, events and the session key.
+The API key is stored only in this browser tab's `sessionStorage`, survives refreshes, and can be removed with **Clear key**. Closing the tab clears its session. It is excluded from analysis exports. Alternatively configure `OPENROUTER_API_KEY` in local `.env` or the Site's secret environment; never prefix it with NEXT_PUBLIC.
 
-## What V1 cannot claim
+Only the strict structured state is sent to the app endpoint and then `POST https://openrouter.ai/api/alpha/decisions`, using `~typesafe/jev-latest` and one Choice question. Jev never receives footage, images, jersey pixels or credentials in its prompt. The endpoint limits input size and rejects raw media and arbitrary additional fields. There is no fallback model for a failed Jev request.
 
-YOLOX Tiny is a generic COCO detector. Small, occluded or blurred basketballs may not be detected; no ball is invented when detection fails. Person detections can include spectators and referees. Possession and teams are user-confirmed, not inferred reliably. Generic track IDs can change during occlusions. Camera motion is not compensated. The motion model is a compact greedy tracker, not a basketball-specific identity model.
+The built-in court schematic is synthetic data with a labeled deterministic rules preview; those weights are not Jev probabilities.
 
-Coordinates use x/y fractions of frame dimensions. Distances correct for image aspect ratio and use fractions of image width; speeds use image-width fractions per second. They are **not physical feet, meters, or player speeds**, and perspective can distort all geometry. Passing lanes are image-plane segment proximity tests, not calibrated tactical measurements. Paint occupancy is omitted because no paint polygon is calibrated.
+## Boundaries and limitations
 
-Jev probabilities describe its preferred next action from the available state. They are not measured shot quality or empirically calibrated action/outcome predictions. The observed action label is entered by the reviewer after reveal. No training, identity recognition, play recognition, live video, full court homography, or accuracy benchmark is claimed.
+- `lib/yolo.ts`: pretrained detector, centered RGB letterbox preprocessing, browser ONNX inference, hoop extraction and jersey color sampling.
+- `lib/vision.ts`: frame extraction, duplicate suppression and generic motion/size matching. Tracks may switch under occlusion or camera movement.
+- `lib/possession.ts`: causal ball-to-player association, short occlusion carry, jersey-color grouping and optional manual overrides. Association confidence is a heuristic, not calibrated accuracy.
+- `lib/court.ts`: causal frame selection, aspect-corrected image-plane geometry, strict facts and decision validation.
+- `app/api/decision/route.ts`: same-origin, bounded structured requests, provider timeouts and visible errors.
 
-## References
+Possession is an estimate, not identity recognition. Track numbers are temporary IDs, not jersey numbers. Balls can be missed or falsely detected; a nearby player does not always have possession. Similar uniforms, skin/background pixels, occluded players and camera cuts can corrupt team estimates. Referee suppression is model-based and can be wrong. Missing teams and basket distances are explicitly unknown and included in the quality limitations supplied to Jev.
 
-- Jev model: https://openrouter.ai/~typesafe/jev-latest
-- OpenRouter Decisions example: https://openrouter.ai/docs/cookbook/building-agents/gate-tool-calls-with-jev
-- TypeSafe Choice request/response: https://docs.typesafe.ai/primitives/choice
-- Pretrained detector: https://github.com/Megvii-BaseDetection/YOLOX/tree/main/demo/ONNXRuntime
+Coordinates and distances use image-width fractions, not feet or meters. There is no court homography or camera compensation. Passing lanes are image-plane tests. Paint occupancy, shot-quality models, play recognition, live video and training remain out of scope.
+
+Jev probabilities express preferred actions from limited facts. They are not a measured basketball prediction benchmark. Observed actions are reviewer labels after reveal.
+
+## Detector attribution
+
+Gabriele Giudici's [E-BARD detection models](https://huggingface.co/GabrieleGiudici/E-BARD-detection-models), [official project](https://github.com/GabrieleGiudic/E-BARD). The author's YOLOv8n weights are distributed under the model card's CC-BY-4.0 license and were converted to ONNX, opset 17, 704×704 float32. No retraining was performed. See `public/models/E-BARD-NOTICE.txt`. The Ultralytics architecture is AGPL-3.0. Browser inference uses ONNX Runtime Web; its license is included under `public/onnx/`.
+
+Jev references: [model](https://openrouter.ai/~typesafe/jev-latest), [OpenRouter decisions example](https://openrouter.ai/docs/cookbook/building-agents/gate-tool-calls-with-jev), [TypeSafe Choice primitive](https://docs.typesafe.ai/primitives/choice).

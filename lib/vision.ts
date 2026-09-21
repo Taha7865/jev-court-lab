@@ -1,5 +1,5 @@
 import type { Clip, Frame, Track } from './court';
-export type Detection={box:[number,number,number,number];confidence:number;kind:'player'|'ball'};
+export type Detection={box:[number,number,number,number];confidence:number;kind:'player'|'ball';jersey?:[number,number,number]};
 export class Tracker {
   private next=1;
   private active: {track:Track;time:number}[]=[];
@@ -34,8 +34,9 @@ export async function analyzeVideo(file:File,onProgress:(progress:number,message
     onProgress(0,'Loading the player & ball detector…');const model=await new Promise<Awaited<ReturnType<typeof detector>>>((resolve,reject)=>{const cancel=()=>{cleanup();reject(new DOMException('Analysis cancelled','AbortError'))};const timer=setTimeout(()=>{cleanup();reject(new Error('The detector could not load. Check your network and try again.'))},60000);const cleanup=()=>{clearTimeout(timer);signal.removeEventListener('abort',cancel)};signal.addEventListener('abort',cancel,{once:true});detector().then(m=>{cleanup();resolve(m)},e=>{cleanup();reject(e)})});check();
     const c=document.createElement('canvas');c.width=Math.min(960,v.videoWidth);c.height=Math.round(c.width*v.videoHeight/v.videoWidth);const ctx=c.getContext('2d',{willReadFrequently:true})!;const frames:Frame[]=[];const tracker=new Tracker();const count=Math.ceil(duration*4);
     for(let i=0;i<count;i++){check();const t=i/4;if(Math.abs(v.currentTime-t)>.001){const ready=wait('seeked');v.currentTime=t;await ready;}check();ctx.drawImage(v,0,0,c.width,c.height);
-      const detections=await model.detect(c);check();const merged=deduplicate(detections);frames.push({time:t,tracks:tracker.update(merged,t)});onProgress((i+1)/count,`Tracking frame ${i+1} of ${count}`);await new Promise(r=>setTimeout(r,0));}
-    if(!frames.some(f=>f.tracks.some(t=>t.kind==='player')))throw new Error('No players were detected. Try a closer, clearer, continuous shot.');
+      const detection=await model.detect(c);check();const merged=deduplicate(detection.detections);frames.push({time:t,tracks:tracker.update(merged,t),basket:detection.basket});onProgress((i+1)/count,`Tracking frame ${i+1} of ${count}`);await new Promise(r=>setTimeout(r,0));}
+    // A valid, decoded clip is still useful when detection finds nothing: keep it
+    // available for playback so the user can inspect the actual uploaded file.
     return {duration,width:v.videoWidth,height:v.videoHeight,frames,sample:false};
   }finally{v.pause();v.removeAttribute('src');v.load();URL.revokeObjectURL(url);}
 }
