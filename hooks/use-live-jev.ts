@@ -18,10 +18,10 @@ export function useLiveJev({snapshot,clip,apiKey,configured,suspended,events,onR
     setStreamError('');
     const instance=new LiveDecisionQueue({
       async run(input,signal){
-        const response=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json',...(apiKey?{Authorization:`Bearer ${apiKey}`}:{})},body:JSON.stringify(input.state),signal:AbortSignal.any([signal,AbortSignal.timeout(30000)])});
-        const result=await response.json() as Decision&{error?:string};
-        if(!response.ok)throw new ProviderError(result.error??'Jev is unavailable.',response.status);
-        return result;
+        const response=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json',...(apiKey?{Authorization:`Bearer ${apiKey}`}:{})},body:JSON.stringify({states:[input.state]}),signal:AbortSignal.any([signal,AbortSignal.timeout(30000)])});
+        const result=await response.json() as {decisions?:Decision[];error?:string};
+        if(!response.ok||!result.decisions?.[0])throw new ProviderError(result.error??'Jev is unavailable.',response.status);
+        return result.decisions[0];
       },
       onResult:(input,decision)=>callbacks.current.onResult({...input,id:crypto.randomUUID(),decision}),
       onBusy:setEvaluating,

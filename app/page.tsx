@@ -2,14 +2,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Upload, Play, Pause, X, LoaderCircle } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import { ACTIONS, atTime, baseline, buildState, sampleClip, sampleSetup, type Action, type Clip, type Frame, type Role, type Setup } from '@/lib/court';
-import type { analyzeVideo as AnalyzeVideo } from '@/lib/vision';
+import { ACTIONS, atTime, baseline, buildState, sampleClip, sampleSetup, type Action, type Clip, type Decision, type Frame, type Role, type Setup } from '@/lib/court';
+import type { analyzeVideoIncrementally as AnalyzeVideoIncrementally } from '@/lib/vision';
 import { resolveSetup } from '@/lib/possession';
 import {useLiveJev} from '@/hooks/use-live-jev';
 import {snapshotKey,visibleDecision,type DecisionEvent} from '@/lib/live-decisions';
+import {hasInitialAnalysisBuffer,playbackLimit} from '@/lib/analysis-buffer';
+import {TimestampedAnalysisQueue} from '@/lib/timestamped-analysis';
 const label=(a:Action)=>a.replaceAll('_',' ');
 const stamp=(t:number)=>`${Math.floor(t/60)}:${(t%60).toFixed(1).padStart(4,'0')}`;
 const pct=(n:number|null)=>n===null?'Unknown':`${(n*100).toFixed(1)}% width`;
+const trackingMessage=(frame?:Frame)=>{const messages:Partial<Record<NonNullable<Frame['possession_status']>,string>>={tracking:'Ball tracked; possession is being revalidated.',occluded:'Ball briefly occluded; carrying possession with declining confidence.',ball_in_flight:'Ball is in flight; possession and recommendation are withheld.',camera_cut:'Camera cut detected; reacquiring ball and possession.',lost:'Ball not tracked; waiting to reacquire possession.'};return messages[frame?.possession_status??'acquiring']??'Acquiring ball and player tracks.';};
 function Overlay({clip,frame,setup,marking,onMark}:{clip:Clip;frame?:Frame;setup:Setup;marking:boolean;onMark:(p:{x:number;y:number})=>void}){
   const width=clip.width,height=clip.height;
   return <svg className={`overlay ${marking?'marking':''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Detected players and ball" onClick={e=>{if(!marking)return;const r=e.currentTarget.getBoundingClientRect();onMark({x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height})}}>
@@ -23,11 +26,11 @@ export default function Home(){
   const [sampleLoaded,setSampleLoaded]=useState(false);
   const [clip,setClip]=useState<Clip>(sampleClip),[setup,setSetup]=useState<Setup>(sampleSetup);
   const [time,setTime]=useState(0),[videoUrl,setVideoUrl]=useState(''),[name,setName]=useState('The closing defender');
-  const [busy,setBusy]=useState(false),[progress,setProgress]=useState(0),[status,setStatus]=useState(''),[error,setError]=useState('');
-  const [playing,setPlaying]=useState(false),[marking,setMarking]=useState(false),[markerTime,setMarkerTime]=useState<number|null>(null),[correctionTime,setCorrectionTime]=useState<number|null>(null);
+  const [busy,setBusy]=useState(false),[analyzing,setAnalyzing]=useState(false),[analyzedThrough,setAnalyzedThrough]=useState(-1),[progress,setProgress]=useState(0),[status,setStatus]=useState(''),[error,setError]=useState('');
+  const [playing,setPlaying]=useState(false),[marking,setMarking]=useState(false),[ballMarking,setBallMarking]=useState(false),[markerTime,setMarkerTime]=useState<number|null>(null),[correctionTime,setCorrectionTime]=useState<number|null>(null);
   const [key,setKey]=useState(''),[keyDraft,setKeyDraft]=useState(''),[connected,setConnected]=useState(false),[dialog,setDialog]=useState(false);
   const [events,setEvents]=useState<DecisionEvent[]>([]),[selected,setSelected]=useState<string|null>(null),[showTracks,setShowTracks]=useState(true);
-  const video=useRef<HTMLVideoElement>(null),input=useRef<HTMLInputElement>(null),abort=useRef<AbortController|null>(null),urlRef=useRef('');
+  const video=useRef<HTMLVideoElement>(null),input=useRef<HTMLInputElement>(null),abort=useRef<AbortController|null>(null),urlRef=useRef(''),ballSeed=useRef<{time:number;x:number;y:number}|null>(null),analysisRun=useRef(0);
   const frame=useMemo(()=>atTime(clip.frames,time),[clip,time]);
   const manualSetup:Setup=correctionTime===frame?.time?setup:{handler:null,roles:{},basket:null};
   const effectiveSetup=useMemo(()=>frame?resolveSetup(clip,frame,setup,markerTime,correctionTime):setup,[setup,markerTime,correctionTime,frame,clip]);
@@ -41,8 +44,10 @@ export default function Home(){
   const result=displayedEvent?.decision??(clip.sample&&sampleLoaded&&state?baseline(state):null);
   const passProbability=result?result.probabilities.PASS_LEFT+result.probabilities.PASS_RIGHT:null;
   const currentPlayers=frame?.tracks.filter(t=>t.kind==='player')??[];
-  const ready=!!state,hasConnection=!!(key||connected),disabled=busy;
-  const live=useLiveJev({snapshot,clip,apiKey:key,configured:connected,suspended:busy||clip.sample||!!selected,events,
+  const ready=!!state,hasConnection=!!(key||connected),disabled=busy||analyzing;
+  const playableThrough=playbackLimit(analyzedThrough,clip.duration,analyzing);
+  const initialBufferReady=hasInitialAnalysisBuffer(analyzedThrough,clip.duration);
+  const live=useLiveJev({snapshot,clip,apiKey:key,configured:connected,suspended:clip.sample||!!selected,events,
     onResult:event=>setEvents(previous=>[...previous.filter(e=>snapshotKey(e)!==snapshotKey(event)),event].sort((a,b)=>a.state.time_seconds-b.state.time_seconds)),
     onRejectedKey:()=>{setKey('');setConnected(false);try{sessionStorage.removeItem('jev-openrouter-key')}catch{}},
   });
@@ -53,11 +58,12 @@ export default function Home(){
     return()=>{abort.current?.abort();if(urlRef.current)URL.revokeObjectURL(urlRef.current)};
   },[]);
   useEffect(()=>{if(!clip.sample||!playing)return;const timer=setInterval(()=>setTime(t=>{if(t>=clip.duration-.05){setPlaying(false);return clip.duration}return Math.min(clip.duration,t+.05)}),50);return()=>clearInterval(timer)},[playing,clip]);
-  const seek=(t:number)=>{live.invalidate();setPlaying(false);video.current?.pause();setTime(t);if(video.current)video.current.currentTime=t;setSelected(null);setMarking(false)};
+  const seek=(t:number)=>{const next=Math.min(t,playableThrough);live.invalidate();setPlaying(false);video.current?.pause();setTime(next);if(video.current)video.current.currentTime=next;setSelected(null);setMarking(false)};
   const changeSetup=(s:Setup)=>{live.invalidate();setSetup(s);setCorrectionTime(frame?.time??null);setSelected(null)};
   const togglePlay=async()=>{
     if(playing){video.current?.pause();setPlaying(false);return;}
     setSelected(null);setMarking(false);
+    if(analyzing&&!initialBufferReady){setStatus(`Preparing ${Math.min(10,Math.round(clip.duration))} seconds of analysis before playback…`);return;}
     if(time>=clip.duration-.1){live.invalidate();setTime(0);if(video.current)video.current.currentTime=0;}
     if(video.current){try{await video.current.play()}catch{setError('Playback could not start. Try seeking to another moment.');return}}
     setPlaying(true);
@@ -66,22 +72,37 @@ export default function Home(){
     if(!file||busy)return;setError('');
     if(!file.type.startsWith('video/')&&!/\.(mp4|mov|webm|m4v)$/i.test(file.name)){setError('Choose an MP4, MOV or WebM basketball clip.');return}
     if(file.size>1024*1024*1024){setError('Choose a video smaller than 1 GB.');return}
-    live.invalidate();video.current?.pause();setPlaying(false);setBusy(true);setProgress(0);setStatus('Opening your clip…');abort.current=new AbortController();
+    const run=++analysisRun.current;live.invalidate();video.current?.pause();setPlaying(false);setBusy(true);setAnalyzing(true);setAnalyzedThrough(-1);ballSeed.current=null;setProgress(0);setStatus('Opening your clip…');abort.current=new AbortController();
     try{
-      const {analyzeVideo}:{analyzeVideo:typeof AnalyzeVideo}=await import('@/lib/vision');
-      const next=await analyzeVideo(file,(p,m)=>{setProgress(p);setStatus(m)},abort.current.signal);
+      // The visible player owns this object URL; the detector has its own decoder.
+      // Local playback is therefore available before the first detection batch.
       if(urlRef.current)URL.revokeObjectURL(urlRef.current);urlRef.current=URL.createObjectURL(file);
-      setVideoUrl(urlRef.current);setClip(next);setTime(0);setName(file.name);setSetup({handler:null,roles:{},basket:null});setMarkerTime(null);setCorrectionTime(null);setEvents([]);setSelected(null);
-      const foundPlayers=next.frames.some(f=>f.tracks.some(t=>t.kind==='player'));
-      setStatus(foundPlayers?`Tracked ${next.frames.length} frames. Jev follows the replay automatically.`:'Analysis finished with no player tracks. The uploaded video is available below.');
+      setVideoUrl(urlRef.current);setSampleLoaded(false);setClip({duration:0,width:16,height:9,frames:[],sample:false});setTime(0);setName(file.name);setSetup({handler:null,roles:{},basket:null});setMarkerTime(null);setCorrectionTime(null);setEvents([]);setSelected(null);setBallMarking(false);
+      const {analyzeVideoIncrementally}:{analyzeVideoIncrementally:typeof AnalyzeVideoIncrementally}=await import('@/lib/vision');
+      let foundPlayers=false;const analyzedFrames:Frame[]=[];
+      // This queue is independent of the media clock. It receives frames in
+      // decode order and only submits causal state/context to the server.
+      const precompute=hasConnection?new TimestampedAnalysisQueue({
+        async run(snapshot,context,signal){const response=await fetch('/api/decision',{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:`Bearer ${key}`}:{})},body:JSON.stringify({items:[{state:snapshot.state,context:context.map(item=>item.state)}]}),signal:AbortSignal.any([signal,AbortSignal.timeout(30000)])});const result=await response.json() as {decisions?:Decision[];error?:string};if(!response.ok||!result.decisions?.[0])throw Error(result.error??'Jev is unavailable.');return result.decisions[0];},
+        onResult:({snapshot,decision})=>{if(run===analysisRun.current)setEvents(previous=>[...previous.filter(event=>snapshotKey(event)!==snapshotKey(snapshot)),{...snapshot,id:crypto.randomUUID(),decision}].sort((a,b)=>a.state.time_seconds-b.state.time_seconds));},
+        onError:reason=>{if(run===analysisRun.current)setError(reason instanceof Error?reason.message:'Background Jev analysis stopped.');},
+      }):null;
+      await analyzeVideoIncrementally(file,{
+        onReady:meta=>{setClip({...meta,frames:[],sample:false});setBusy(false);setStatus('Preparing the first analysis buffer…');},
+        onBatch:(batch,through,meta)=>{foundPlayers||=batch.some(f=>f.tracks.some(t=>t.kind==='player'));for(const nextFrame of batch){analyzedFrames.push(nextFrame);const causalClip:Clip={...meta,frames:analyzedFrames,sample:false};const nextSetup=resolveSetup(causalClip,nextFrame,{handler:null,roles:{},basket:null},null);const nextState=buildState(causalClip,nextFrame,nextSetup);if(nextState)precompute?.enqueue({state:nextState,setup:nextSetup});}setClip(current=>({...current,frames:[...current.frames,...batch]}));setAnalyzedThrough(through);},
+        onProgress:(p,m)=>{setProgress(p);setStatus(m)},getBallSeed:()=>ballSeed.current,
+      },abort.current.signal);
+      setStatus(foundPlayers?'Analysis caught up to the end of the clip.':'Analysis finished with no player tracks. The local video is still available below.');
       if(!foundPlayers)setError('No players were detected in this file. Play the uploaded preview to check it contains the intended basketball footage.');
+      // Do not block playback on provider latency. Cached timestamped results
+      // arrive as they are ready; late results are still tied to their frame.
     }catch(e){
       if(e instanceof Error&&e.name!=='AbortError'){setError(e.message.includes('dynamically imported')?'The detector could not load. Reload the page and try again.':e.message);setStatus('Analysis stopped. Your previous possession is unchanged.')}
       else setStatus('Analysis cancelled. Your previous possession is unchanged.');
-    }finally{setBusy(false);abort.current=null;if(input.current)input.current.value=''}
+    }finally{setBusy(false);setAnalyzing(false);abort.current=null;if(input.current)input.current.value=''}
   }
   function loadSample(){
-    if(busy)return;live.invalidate();video.current?.pause();setPlaying(false);setSampleLoaded(true);setClip(sampleClip());setSetup(sampleSetup);setVideoUrl('');
+    if(busy||analyzing)return;analysisRun.current++;live.invalidate();video.current?.pause();setPlaying(false);setSampleLoaded(true);setAnalyzedThrough(-1);setClip(sampleClip());setSetup(sampleSetup);setVideoUrl('');
     if(urlRef.current)URL.revokeObjectURL(urlRef.current);urlRef.current='';setName('The closing defender');setTime(0);setEvents([]);setSelected(null);setError('');setStatus('');setMarkerTime(null);setCorrectionTime(null);
   }
   function openEvent(e:DecisionEvent){if(busy)return;seek(e.state.time_seconds);setSetup(e.setup);setMarkerTime(e.state.time_seconds);setCorrectionTime(e.state.time_seconds);setSelected(e.id)}
@@ -90,22 +111,23 @@ export default function Home(){
   const readable=useRef({state,events,displayedDecision:displayedEvent??null,playing,evaluating});readable.current={state,events,displayedDecision:displayedEvent??null,playing,evaluating};
   useEffect(()=>{const context=(document as unknown as {modelContext?:{registerTool:(t:unknown,o:{signal:AbortSignal})=>void|Promise<void>}}).modelContext;if(!context?.registerTool)return;const life=new AbortController();Promise.resolve(context.registerTool({name:'read_court_decision',description:'Read the current basketball court state, live displayed decision and timeline. Does not upload video or call Jev.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:(args:unknown)=>{if(!args||typeof args!=='object'||Object.keys(args).length)throw Error('Expected an empty object.');return structuredClone(readable.current)}},{signal:life.signal})).catch(()=>{});return()=>life.abort()},[]);
   return <main>
-    <header><h1>JEV</h1><div className="header-actions"><button onClick={()=>input.current?.click()} disabled={busy}><Upload size={16}/>Upload video</button><button onClick={()=>{setKeyDraft(key);setDialog(true)}}>{hasConnection?'Connected to Jev':'Connect Jev'}</button></div></header>
-    <input ref={input} className="hidden-input" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={e=>void upload(e.target.files?.[0])} disabled={busy} aria-label="Upload basketball video"/>
+    <header><h1>JEV</h1><div className="header-actions"><button onClick={()=>input.current?.click()} disabled={busy||analyzing}><Upload size={16}/>Upload video</button><button onClick={()=>{setKeyDraft(key);setDialog(true)}}>{hasConnection?'Connected to Jev':'Connect Jev'}</button></div></header>
+    <input ref={input} className="hidden-input" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={e=>void upload(e.target.files?.[0])} disabled={busy||analyzing} aria-label="Upload basketball video"/>
     {error&&<div className="notice" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}><X size={16}/></button></div>}
     <div className="workspace">
       <section className="clip-column" aria-label="Basketball clip">
         <div className="section-heading"><h2>Clip</h2>{hasClip&&<span className="filename" title={name}>{name}</span>}</div>
         <div className="video-stage" style={{aspectRatio:hasClip?`${clip.width}/${clip.height}`:'16/9'}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer.files[0])}}>
-          {!hasClip?<button className="upload-empty" disabled={busy} onClick={()=>input.current?.click()}><Upload size={24}/><span>Drop a basketball video</span><small>MP4, MOV or WebM · up to 1 GB</small></button>:<>
-            {!clip.sample&&<video ref={video} src={videoUrl} playsInline muted preload="auto" autoPlay={hasConnection} onLoadedMetadata={()=>{if(video.current)video.current.currentTime=time}} onTimeUpdate={()=>{if(video.current)setTime(video.current.currentTime)}} onEnded={()=>setPlaying(false)} onPause={()=>setPlaying(false)} onPlay={()=>setPlaying(true)} onError={()=>setError('The clip could not be played. Try an H.264 MP4 or WebM file.')} aria-label="Uploaded basketball video"/>}
-            {(showTracks||marking)&&<Overlay clip={clip} frame={frame} setup={effectiveSetup} marking={marking} onMark={p=>{changeSetup({...manualSetup,basket:p});setMarkerTime(frame?.time??null);setMarking(false)}}/>}
+          {!hasClip?<button className="upload-empty" disabled={busy||analyzing} onClick={()=>input.current?.click()}><Upload size={24}/><span>Drop a basketball video</span><small>MP4, MOV or WebM · up to 1 GB</small></button>:<>
+            {!clip.sample&&<video ref={video} src={videoUrl} playsInline muted preload="auto" onLoadedMetadata={()=>{if(video.current)video.current.currentTime=time}} onTimeUpdate={()=>{if(!video.current)return;const next=video.current.currentTime;if(analyzing&&next>playableThrough){video.current.pause();video.current.currentTime=playableThrough;setTime(playableThrough);setStatus('Playback paused at the end of the analysis buffer.');return}setTime(next)}} onEnded={()=>setPlaying(false)} onPause={()=>setPlaying(false)} onPlay={()=>setPlaying(true)} onError={()=>setError('The clip could not be played. Try an H.264 MP4 or WebM file.')} aria-label="Uploaded basketball video"/>}
+            {(showTracks||marking||ballMarking)&&<Overlay clip={clip} frame={frame} setup={effectiveSetup} marking={marking||ballMarking} onMark={p=>{if(ballMarking){ballSeed.current={time:frame?.time??time,...p};setBallMarking(false);setStatus('Ball tracking will initialize from this point in the next timestamped batch.');return}changeSetup({...manualSetup,basket:p});setMarkerTime(frame?.time??null);setMarking(false)}}/>}
           </>}
           {busy&&<div className="stage-cover" role="status"><LoaderCircle className="spin"/><strong>{status}</strong><progress value={progress} max="1"/><button onClick={()=>abort.current?.abort()}>Cancel</button></div>}
-          {marking&&<div className="mark-help">Click the basket</div>}
+          {(marking||ballMarking)&&<div className="mark-help">Click the {ballMarking?'ball or its handler':'basket'}</div>}
         </div>
-        {hasClip&&<><div className="playbar"><button aria-label={playing?'Pause replay':'Play replay'} disabled={busy} onClick={()=>void togglePlay()}>{playing?<Pause size={19}/>:<Play size={19}/>}</button><span>{stamp(time)}</span><input aria-label="Replay time" type="range" min="0" max={clip.duration} step=".05" value={time} disabled={busy} onChange={e=>seek(Number(e.target.value))}/><span>{stamp(clip.duration)}</span></div>
-          <div className="detection-line"><span>{currentPlayers.length} players · {frame?.tracks.some(t=>t.kind==='ball')?'Ball detected':'Ball not visible'}{effectiveSetup.handler!==null?` · Handler #${effectiveSetup.handler}`:''}</span><button className="text-button" aria-pressed={showTracks} onClick={()=>setShowTracks(v=>!v)}>{showTracks?'Hide':'Show'} detections</button></div>
+        {hasClip&&<><div className="playbar"><button aria-label={playing?'Pause replay':'Play replay'} disabled={busy} onClick={()=>void togglePlay()}>{playing?<Pause size={19}/>:<Play size={19}/>}</button><span>{stamp(time)}</span><input aria-label="Replay time" type="range" min="0" max={playableThrough} step=".05" value={Math.min(time,playableThrough)} disabled={busy||playableThrough===0} onChange={e=>seek(Number(e.target.value))}/><span>{stamp(clip.duration)}</span></div>
+          <div className="detection-line"><span>{currentPlayers.length} players · {frame?.ball_visible?'Ball visible':'Ball not visible'}{frame?.ball_track_confidence!==undefined?` · Track ${Math.round(frame.ball_track_confidence*100)}%`:''}{effectiveSetup.handler!==null?` · Handler #${effectiveSetup.handler}`:''}</span><button className="text-button" aria-pressed={showTracks} onClick={()=>setShowTracks(v=>!v)}>{showTracks?'Hide':'Show'} detections</button></div>
+          {!clip.sample&&<p className="analysis-buffer" role="status">{analyzing?`Analyzed through ${stamp(Math.max(0,analyzedThrough))} · ${initialBufferReady?'playback buffer ready':'building playback buffer'}`:`Analyzed through ${stamp(clip.duration)} · complete`}</p>}
           {clip.sample&&<p className="small">Synthetic sample · rules only</p>}
           {currentEvent&&<button onClick={()=>void togglePlay()}>Resume live replay</button>}
         </>}
@@ -116,12 +138,12 @@ export default function Home(){
           <li><a href="https://www.nba.com/watch/video/cavaliers-warriors-2016-nba-finals-game-7" target="_blank" rel="noreferrer">Cavaliers–Warriors · 2016 Finals, Game 7</a><span>Full game</span></li>
         </ul><p className="small">Official viewing links. Upload a local copy you’re allowed to use; these pages aren’t direct video imports. Longer videos are supported. Processing time grows with length.</p></details>
         <details className="extras"><summary>Tools</summary><div className="tool-actions"><button onClick={loadSample} disabled={busy}>Load synthetic sample</button><button onClick={exportData} disabled={!hasClip||busy}>Export analysis</button></div>
-          {hasClip&&<><label>Correct ball handler<select disabled={disabled||!currentPlayers.length} value={effectiveSetup.handler??''} onChange={e=>changeSetup({...manualSetup,handler:e.target.value?Number(e.target.value):null,handlerSource:'user_confirmed',handlerConfidence:1})}><option value="">Automatic</option>{currentPlayers.map(t=><option key={t.id} value={t.id}>Player #{t.id}</option>)}</select></label><div className="tool-actions"><button disabled={busy||clip.sample} onClick={()=>{setPlaying(false);video.current?.pause();setMarking(v=>!v);setShowTracks(true)}}>{marking?'Cancel marking':'Correct basket'}</button><button disabled={busy} onClick={()=>{changeSetup({handler:null,roles:{},basket:null});setMarkerTime(null)}}>Restore automatic detection</button></div><div className="track-assignments">{currentPlayers.map(t=><label key={t.id}>#{t.id}<select aria-label={`Team for player ${t.id}`} disabled={disabled||effectiveSetup.handler===t.id} value={effectiveSetup.roles[t.id]??''} onChange={e=>changeSetup({...manualSetup,roles:{...manualSetup.roles,[t.id]:e.target.value as Role}})}><option value="" disabled>Unknown</option><option value="offense">Offense</option><option value="defense">Defense</option><option value="ignore">Ignore</option></select></label>)}</div></>}
+          {hasClip&&<><label>Correct ball handler<select disabled={disabled||!currentPlayers.length} value={effectiveSetup.handler??''} onChange={e=>changeSetup({...manualSetup,handler:e.target.value?Number(e.target.value):null,handlerSource:'user_confirmed',handlerConfidence:1})}><option value="">Automatic</option>{currentPlayers.map(t=><option key={t.id} value={t.id}>Player #{t.id}</option>)}</select></label><div className="tool-actions"><button disabled={busy||clip.sample} onClick={()=>{setPlaying(false);video.current?.pause();setMarking(v=>!v);setShowTracks(true)}}>{marking?'Cancel marking':'Correct basket'}</button><button disabled={busy||clip.sample} onClick={()=>{setPlaying(false);video.current?.pause();setBallMarking(v=>!v);setShowTracks(true)}}>{ballMarking?'Cancel ball mark':'Initialize ball tracking'}</button><button disabled={busy} onClick={()=>{changeSetup({handler:null,roles:{},basket:null});setMarkerTime(null)}}>Restore automatic detection</button></div><div className="track-assignments">{currentPlayers.map(t=><label key={t.id}>#{t.id}<select aria-label={`Team for player ${t.id}`} disabled={disabled||effectiveSetup.handler===t.id} value={effectiveSetup.roles[t.id]??''} onChange={e=>changeSetup({...manualSetup,roles:{...manualSetup.roles,[t.id]:e.target.value as Role}})}><option value="" disabled>Unknown</option><option value="offense">Offense</option><option value="defense">Defense</option><option value="ignore">Ignore</option></select></label>)}</div></>}
         </details>
       </section>
       <aside className="analysis-column" aria-label="Jev analysis">
         <div className="section-heading"><h2>Jev analysis</h2>{displayedEvent&&<time>{stamp(displayedEvent.state.time_seconds)}</time>}</div>
-        <p className="live-status" role="status">{busy?'Detecting players and ball…':!hasClip?'Upload a video to begin.':clip.sample?'Rules preview — not Jev':!hasConnection?'Connect Jev to analyze this video.':streamError?'Analysis paused':!ready?'Waiting for clear ball possession':evaluating?'Updating…':currentEvent?'Saved moment':playing?'Following playback':'Paused'}</p>
+        <p className="live-status" role="status">{busy?'Opening local video…':!hasClip?'Upload a video to begin.':clip.sample?'Rules preview — not Jev':!hasConnection?'Connect Jev to analyze this video.':streamError?'Analysis paused':!ready?trackingMessage(frame):evaluating?'Updating cached analysis…':currentEvent?'Saved moment':playing?'Following timestamped analysis':'Paused — cached decisions stay attached to their frames'}</p>
         <div className="pass-result"><span>Pass now</span><strong>{passProbability===null?'—':`${Math.round(passProbability*100)}%`}</strong></div>
         <p className="small">Jev’s preference for passing now, not the chance a pass succeeds.</p>
         <div className="probabilities">{ACTIONS.map(a=><div key={a}><div><span>{label(a).toLowerCase().replace(/^./,c=>c.toUpperCase())}</span><strong>{result?`${(result.probabilities[a]*100).toFixed(1)}%`:'—'}</strong></div><div className="prob-track"><i style={{width:`${(result?.probabilities[a]??0)*100}%`}}/></div></div>)}</div>

@@ -1,5 +1,6 @@
 import {sceneChanged,BallEvidence} from './detection-geometry.ts';
 import type { Clip, Frame, Track } from './court';
+import {PersistentBallTracker} from './ball-tracking.ts';
 export type Detection={box:[number,number,number,number];confidence:number;kind:'player'|'ball';jersey?:[number,number,number]};
 export class Tracker {
   private next=1;
@@ -33,21 +34,46 @@ export function deduplicate(detections:Detection[]):Detection[]{
 }
 let modelPromise:Promise<Awaited<ReturnType<typeof import('./yolo').loadYolo>>>|undefined;
 async function detector(){if(!modelPromise)modelPromise=import('./yolo').then(y=>y.loadYolo()).catch(e=>{modelPromise=undefined;throw e});return modelPromise;}
-export async function analyzeVideo(file:File,onProgress:(progress:number,message:string)=>void,signal:AbortSignal):Promise<Clip>{
+export type VideoMetadata={duration:number;width:number;height:number};
+export type IncrementalAnalysisOptions={
+  /** Fires as soon as the file is decodable, before model loading or detection. */
+  onReady:(metadata:VideoMetadata)=>void;
+  /** Frames are ordered, timestamped and share one tracker across every batch. */
+  onBatch:(frames:Frame[],analyzedThrough:number,metadata:VideoMetadata)=>void|Promise<void>;
+  onProgress:(progress:number,message:string)=>void;
+  batchSize?:number;
+  getBallSeed?:()=>{time:number;x:number;y:number}|null;
+};
+
+/**
+ * Decode and detect a local file in short, ordered batches. The Tracker and
+ * BallEvidence intentionally live outside the batch loop so IDs and short
+ * possession carries do not restart at a batch boundary.
+ */
+export async function analyzeVideoIncrementally(file:File,options:IncrementalAnalysisOptions,signal:AbortSignal):Promise<VideoMetadata>{
   const v=document.createElement('video');v.muted=true;v.playsInline=true;v.preload='auto';const url=URL.createObjectURL(file);v.src=url;
   const check=()=>{if(signal.aborted)throw new DOMException('Analysis cancelled','AbortError')};
   const wait=(event:string,timeout=15000)=>new Promise<void>((resolve,reject)=>{const done=()=>{clearTimeout(timer);v.removeEventListener(event,ok);v.removeEventListener('error',bad);signal.removeEventListener('abort',abort);};const ok=()=>{done();resolve()};const bad=()=>{done();reject(new Error('This video cannot be decoded. Try an H.264 MP4 or WebM clip.'))};const abort=()=>{done();reject(new DOMException('Analysis cancelled','AbortError'))};const timer=setTimeout(()=>{done();reject(new Error('Video decoding timed out. Try another clip.'))},timeout);v.addEventListener(event,ok,{once:true});v.addEventListener('error',bad,{once:true});signal.addEventListener('abort',abort,{once:true});});
   try{check();await wait('loadeddata');check();const duration=v.duration;
     if(!Number.isFinite(duration)||duration<=0||duration>86400)throw new Error('Choose a playable video with a duration below 24 hours.');
     if(!v.videoWidth||!v.videoHeight)throw new Error('Video dimensions are unavailable.');
-    onProgress(0,'Loading the player & ball detector…');const model=await new Promise<Awaited<ReturnType<typeof detector>>>((resolve,reject)=>{const cancel=()=>{cleanup();reject(new DOMException('Analysis cancelled','AbortError'))};const timer=setTimeout(()=>{cleanup();reject(new Error('The detector could not load. Check your network and try again.'))},60000);const cleanup=()=>{clearTimeout(timer);signal.removeEventListener('abort',cancel)};signal.addEventListener('abort',cancel,{once:true});detector().then(m=>{cleanup();resolve(m)},e=>{cleanup();reject(e)})});check();
-    const c=document.createElement('canvas');c.width=Math.min(1600,v.videoWidth);c.height=Math.round(c.width*v.videoHeight/v.videoWidth);const ctx=c.getContext('2d',{willReadFrequently:true})!;const frames:Frame[]=[];const tracker=new Tracker();const ballEvidence=new BallEvidence();const count=Math.ceil(duration*4);
+    const metadata={duration,width:v.videoWidth,height:v.videoHeight};options.onReady(metadata);
+    options.onProgress(0,'Loading the player & ball detector…');const model=await new Promise<Awaited<ReturnType<typeof detector>>>((resolve,reject)=>{const cancel=()=>{cleanup();reject(new DOMException('Analysis cancelled','AbortError'))};const timer=setTimeout(()=>{cleanup();reject(new Error('The detector could not load. Check your network and try again.'))},60000);const cleanup=()=>{clearTimeout(timer);signal.removeEventListener('abort',cancel)};signal.addEventListener('abort',cancel,{once:true});detector().then(m=>{cleanup();resolve(m)},e=>{cleanup();reject(e)})});check();
+    const c=document.createElement('canvas');c.width=Math.min(1600,v.videoWidth);c.height=Math.round(c.width*v.videoHeight/v.videoWidth);const ctx=c.getContext('2d',{willReadFrequently:true})!;const tracker=new Tracker();const ballEvidence=new BallEvidence();const possession=new PersistentBallTracker();const count=Math.ceil(duration*4),batch:Frame[]=[];
     const thumb=document.createElement('canvas');thumb.width=32;thumb.height=18;const thumbContext=thumb.getContext('2d',{willReadFrequently:true})!;let previous:Uint8ClampedArray|undefined;
     for(let i=0;i<count;i++){check();const t=i/4;if(Math.abs(v.currentTime-t)>.001){const ready=wait('seeked');v.currentTime=t;await ready;}check();ctx.drawImage(v,0,0,c.width,c.height);
       thumbContext.drawImage(c,0,0,32,18);const current=thumbContext.getImageData(0,0,32,18).data;const scene_cut=sceneChanged(previous,current);previous=current;if(scene_cut){tracker.reset();ballEvidence.reset();}
-      const detection=await model.detect(c,signal);check();const selected=ballEvidence.select(deduplicate(detection.detections),t,c.height/c.width);frames.push({time:t,tracks:tracker.update(selected.detections,t),basket:detection.basket,scene_cut,ball_uncertain:selected.uncertain});onProgress((i+1)/count,`Detecting players and ball · ${Math.round((i+1)/count*100)}%`);await new Promise(r=>setTimeout(r,0));}
-    // A valid, decoded clip is still useful when detection finds nothing: keep it
-    // available for playback so the user can inspect the actual uploaded file.
-    return {duration,width:v.videoWidth,height:v.videoHeight,frames,sample:false};
+      const detection=await model.detect(c,signal);check();const selected=ballEvidence.select(deduplicate(detection.detections),t,c.height/c.width);const tracks=tracker.update(selected.detections,t);const seed=options.getBallSeed?.();if(seed&&Math.abs(seed.time-t)<=.26)possession.initializeAt(seed,tracks,t);if(scene_cut)possession.reset();batch.push({time:t,tracks,basket:detection.basket,scene_cut,ball_uncertain:selected.uncertain,...possession.update({time:t,tracks,scene_cut,ball_uncertain:selected.uncertain})});
+      const complete=i+1;if(batch.length>=(options.batchSize??12)||complete===count){await options.onBatch(batch.splice(0),t,metadata);check();}
+      options.onProgress(complete/count,`Detecting players and ball · ${Math.round(complete/count*100)}%`);await new Promise(r=>setTimeout(r,0));}
+    return metadata;
   }finally{v.pause();v.removeAttribute('src');v.load();URL.revokeObjectURL(url);}
+}
+
+/** Backward-compatible one-shot helper for callers that need a complete clip. */
+export async function analyzeVideo(file:File,onProgress:(progress:number,message:string)=>void,signal:AbortSignal):Promise<Clip>{
+  const frames:Frame[]=[];let metadata:VideoMetadata|undefined;
+  await analyzeVideoIncrementally(file,{onReady:m=>{metadata=m},onBatch:batch=>{frames.push(...batch)},onProgress},signal);
+  if(!metadata)throw new Error('Video metadata was unavailable.');
+  return {...metadata,frames,sample:false};
 }

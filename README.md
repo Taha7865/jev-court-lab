@@ -19,9 +19,9 @@ If detection finds no players, the exact uploaded video remains playable to help
 
 ## Live replay behavior
 
-CV still prepares the uploaded clip at 4 fps first; this is live decision analysis of a replay, not camera or live-stream ingestion. Jev requests contain only the court facts for their timestamp, never future frames.
+CV decodes the uploaded clip at 4 fps in ordered 12-frame batches. The local browser player is available as soon as metadata is decoded; it waits for an initial 10-second processed buffer and cannot cross the analyzed-through boundary while detection continues. This is replay analysis, not camera or live-stream ingestion. Jev receives only structured court facts for a timestamp plus up to one second of earlier causal context—never future frames.
 
-The single-flight queue targets the newest available state and limits starts to one every 500 ms. Slow responses do not pause playback or cause intermediate frames to pile up. The panel shows each response's timestamp. It hides results from a future frame, another handler, an uncertain current possession, or more than 1.5 seconds behind the sampled play. Paused moments require an exact state match. API speed and detection confidence determine the actual update rate; this is not an inference for every video frame.
+During ingestion, timestamp-ordered state snapshots are cached at 250 ms of video time (and state transitions are never skipped). Scrubbing reads those saved timestamps rather than requesting an alternative frame. Responses that belong to a replaced clip are discarded. The panel hides results from a future frame, another handler, or an invalidated possession.
 
 Completed states are reused when rewinding. Seeking, replacing a clip or editing facts invalidates in-flight results. Hidden tabs and saved-snapshot inspection suspend new requests. A provider error pauses analysis until retry, reconnection or a new clip. The synthetic sample animates local rules and does not spend OpenRouter credits.
 
@@ -38,7 +38,7 @@ The optional built-in sample uses synthetic data with a labeled deterministic ru
 ## Boundaries and limitations
 
 - `lib/yolo.ts`: pretrained detector, centered RGB letterbox preprocessing, browser ONNX inference, hoop extraction and jersey color sampling.
-- `lib/vision.ts`: frame extraction, duplicate suppression and generic motion/size/jersey matching. Lower-confidence player detections can extend existing tracks but cannot create new IDs. Abrupt scene changes reset tracks and ball continuity. Tracks may switch under occlusion or camera movement.
+- `lib/vision.ts` and `lib/ball-tracking.ts`: ordered batch extraction, duplicate suppression, generic motion/size/jersey matching, and causal ball/possession recovery. Ball visibility, ball-track confidence and possession confidence are separate. A click may seed ball tracking; it is revalidated against nearby players. Brief occlusions decay over 0.5 seconds of video time; passes, shots and camera cuts invalidate the prior possession immediately.
 - `lib/detection-geometry.ts`: overlapping crops, coordinate restoration, tile-edge rejection, camera-cut heuristic and active-ball evidence filtering.
 - `lib/possession.ts`: causal ball-to-player association, short occlusion carry, jersey-color grouping and optional manual overrides. Association confidence is a heuristic, not calibrated accuracy.
 - `lib/court.ts`: causal frame selection, aspect-corrected image-plane geometry, strict facts and decision validation.

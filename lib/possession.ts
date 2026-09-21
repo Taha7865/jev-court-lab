@@ -23,6 +23,7 @@ function directPossession(frame:Frame,aspect:number):PossessionEstimate{
   return candidates.length?{handler:candidates[0].id,confidence:candidates[0].confidence,source:'ball_proximity'}:{handler:null,confidence:0,source:'unknown'};
 }
 export function estimatePossession(clip:Clip,frame:Frame):PossessionEstimate{
+  if(frame.possession_status&&frame.possession_status!=='acquiring')return {handler:frame.possession_handler??null,confidence:frame.possession_confidence??0,source:frame.possession_source??'unknown'};
   const direct=directPossession(frame,clip.height/clip.width);if(direct.handler!==null)return direct;
   // Use only past evidence, and stop carrying possession after half a second.
   // A visible unassociated ball may be a pass or shot, so do not carry through it.
