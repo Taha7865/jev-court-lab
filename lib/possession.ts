@@ -26,11 +26,11 @@ export function estimatePossession(clip:Clip,frame:Frame):PossessionEstimate{
   const direct=directPossession(frame,clip.height/clip.width);if(direct.handler!==null)return direct;
   // Use only past evidence, and stop carrying possession after half a second.
   // A visible unassociated ball may be a pass or shot, so do not carry through it.
-  if(frame.tracks.some(t=>t.kind==='ball'))return direct;
+  if(frame.ball_uncertain||frame.scene_cut||frame.tracks.some(t=>t.kind==='ball'))return direct;
   for(const prior of clip.frames.filter(f=>f.time<frame.time&&frame.time-f.time<=.5).reverse()){
     const estimate=directPossession(prior,clip.height/clip.width);
     if(estimate.handler!==null&&frame.tracks.some(t=>t.kind==='player'&&t.id===estimate.handler))return {...estimate,confidence:estimate.confidence*(1-(frame.time-prior.time)*.5),source:'recent_ball_track'};
-    if(prior.tracks.some(t=>t.kind==='ball'))break;
+    if(prior.ball_uncertain||prior.scene_cut||prior.tracks.some(t=>t.kind==='ball'))break;
   }
   return direct;
 }

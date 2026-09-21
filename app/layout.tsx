@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "JEV Court Lab — See the next move",
-  description: "One basketball possession. Track players, reconstruct the court, and ask Jev for a structured decision.",
+  title: "JEV Court Lab",
+  description: "Basketball video tracking and automatic Jev passing decisions.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

@@ -1,6 +1,6 @@
 # JEV Court Lab
 
-One uploaded 5–15 second basketball possession → detected players, basketball and hoop → generic tracks → deterministic court facts → TypeSafe Jev judgments during replay → annotated replay and decision timeline.
+An uploaded basketball video → detected players, basketball and hoop → generic tracks → deterministic court facts → TypeSafe Jev judgments during replay → annotated replay and decision timeline.
 
 ## Run
 
@@ -8,9 +8,9 @@ Requires Node 22.13+. Run `npm install`, then `npm run dev`. `npm test` checks g
 
 ## Use
 
-1. Upload one continuous shot under 80 MB. H.264 MP4 and browser-decodable MOV/WebM work.
-2. The browser samples at 4 fps and runs the pretrained E-BARD YOLOv8n basketball detector. It distinguishes basketballs, hoops, players and referees. No custom training is performed.
-3. Ball proximity estimates possession; brief occlusions can use at most 0.5 seconds of past ball evidence. Similar jersey colors group teammates. A detected hoop supplies the basket position. The replay starts at the beginning of the clip.
+1. Upload a video under 1 GB. The old 5–15 second restriction is removed; multi-minute videos and longer footage are accepted (finite duration up to 24 hours). Processing time grows with length. H.264 MP4 and browser-decodable MOV/WebM work.
+2. The browser samples at 4 fps, retains up to 1600 pixels of width, and runs the pretrained E-BARD YOLOv8n basketball detector on the whole frame plus three overlapping square crops for wide/tall videos. WebGPU acceleration is used when available, with WASM fallback. It distinguishes basketballs, hoops, players and referees. No custom training is performed.
+3. Ball candidates require plausible player proximity or recent ball continuity; ambiguous candidates stay unknown. Ball proximity estimates possession; brief occlusions can use at most 0.5 seconds of past ball evidence. Similar jersey colors group teammates. A detected hoop supplies the basket position. The replay starts at the beginning of the clip.
 4. Connect OpenRouter. After tracking finishes, playback starts automatically when connected. Jev evaluates successive structured court states during the replay, with up to two requests per second. There is no per-moment Ask button.
 5. Watch the probability bars update while the video continues uninterrupted. Pause or scrub to inspect another moment; that state is evaluated automatically. Optional handler, team and hoop corrections apply to the current frame and automatically update the analysis.
 6. Each response is saved on the timeline. Select a saved moment to inspect its exact state or label the observed action; Resume live replay returns to moving odds. Export includes tracks, states, responses and observations.
@@ -33,12 +33,13 @@ The API key is stored only in this browser tab's `sessionStorage`, survives refr
 
 Only the strict structured state is sent to the app endpoint and then `POST https://openrouter.ai/api/alpha/decisions`, using `~typesafe/jev-latest` and one Choice question. Jev never receives footage, images, jersey pixels or credentials in its prompt. The endpoint limits input size and rejects raw media and arbitrary additional fields. There is no fallback model for a failed Jev request.
 
-The built-in court schematic is synthetic data with a labeled deterministic rules preview; those weights are not Jev probabilities.
+The optional built-in sample uses synthetic data with a labeled deterministic rules preview; those weights are not Jev probabilities.
 
 ## Boundaries and limitations
 
 - `lib/yolo.ts`: pretrained detector, centered RGB letterbox preprocessing, browser ONNX inference, hoop extraction and jersey color sampling.
-- `lib/vision.ts`: frame extraction, duplicate suppression and generic motion/size matching. Tracks may switch under occlusion or camera movement.
+- `lib/vision.ts`: frame extraction, duplicate suppression and generic motion/size/jersey matching. Lower-confidence player detections can extend existing tracks but cannot create new IDs. Abrupt scene changes reset tracks and ball continuity. Tracks may switch under occlusion or camera movement.
+- `lib/detection-geometry.ts`: overlapping crops, coordinate restoration, tile-edge rejection, camera-cut heuristic and active-ball evidence filtering.
 - `lib/possession.ts`: causal ball-to-player association, short occlusion carry, jersey-color grouping and optional manual overrides. Association confidence is a heuristic, not calibrated accuracy.
 - `lib/court.ts`: causal frame selection, aspect-corrected image-plane geometry, strict facts and decision validation.
 - `lib/live-decisions.ts` and `hooks/use-live-jev.ts`: rate-limited automatic requests, completed-state reuse, late-response rejection and timestamp-safe display.
@@ -55,3 +56,24 @@ Jev probabilities express preferred actions from limited facts. They are not a m
 Gabriele Giudici's [E-BARD detection models](https://huggingface.co/GabrieleGiudici/E-BARD-detection-models), [official project](https://github.com/GabrieleGiudic/E-BARD). The author's YOLOv8n weights are distributed under the model card's CC-BY-4.0 license and were converted to ONNX, opset 17, 704×704 float32. No retraining was performed. See `public/models/E-BARD-NOTICE.txt`. The Ultralytics architecture is AGPL-3.0. Browser inference uses ONNX Runtime Web; its license is included under `public/onnx/`.
 
 Jev references: [model](https://openrouter.ai/~typesafe/jev-latest), [OpenRouter decisions example](https://openrouter.ai/docs/cookbook/building-agents/gate-tool-calls-with-jev), [TypeSafe Choice primitive](https://docs.typesafe.ai/primitives/choice).
+
+## Passing question
+
+The question is normative: **Should the current handler release a pass now instead of shooting, driving or retaining possession?** It is not “will a pass happen?” or “will it succeed?”. A favorable pass has a visible same-team receiver, an estimated unblocked lane, and receiver space or pressure relief that makes passing preferable. Missing defenders are not proof of an open lane. The prompt explicitly says this and remains one Choice question.
+
+The headline **Pass now = P(PASS_LEFT) + P(PASS_RIGHT)**. The original five probabilities remain visible and sum to one. Screen-left/right refer to the receiver's image x-coordinate relative to the handler; they do not name a receiver when several players are on that side.
+
+Lane geometry checks whether a known defender's feet lie between 8% and 92% of the handler-to-receiver segment, within 3.5% of image width. A known defender there means blocked; an unassigned player there, or no known defenders, means unknown. Otherwise the observed lane is labeled clear. This is a 2D heuristic, not physical pass completion validation. Reach, depth, pass speed, player skill, score and shot clock are not modeled. Observed-action labels allow comparing what happened, not proving the chosen action was optimal.
+
+## Official NBA footage sources
+
+The interface includes a collapsed list of verified official viewing pages:
+
+- [Timberwolves–Nuggets uncut run](https://www.nba.com/watch/video/min-14-0-run-uncut?collection=uncut-moments&plsrc=nba): 4:52.
+- [Mavericks–Knicks uncut run](https://www.nba.com/watch/video/mavericks-big-run-vs-knicks-uncut?collection=uncut-moments&plsrc=nba): 6:00.
+- [Celtics–Knicks double-overtime finish](https://www.nba.com/watch/video/uncut-lookback-to-celtics-vs-knicks-2ot-thriller-opening-night-2021?collection=uncut-moments&plsrc=nba): 8:31.
+- [Cavaliers–Warriors, 2016 Finals Game 7](https://www.nba.com/watch/video/cavaliers-warriors-2016-nba-finals-game-7): full-game source.
+
+These are viewing links, not bundled media or guaranteed direct downloads. The app processes user-supplied local video. Consecutive possessions give better coverage of passes and non-passes than a made-basket highlight reel. Broadcast cuts and replays still require caution. This source search did not bypass playback access controls.
+
+Crop inference follows the general [SAHI](https://obss.github.io/sahi/) approach, implemented in the browser against the existing ONNX model. OpenCV and Ultralytics were used locally to investigate candidate detections on the supplied footage; Python is not required by the hosted site.

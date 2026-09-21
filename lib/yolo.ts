@@ -1,12 +1,14 @@
 import type {Detection} from './vision';
 import type {Point} from './court';
+import {detectionCrops,restoreCrop} from './detection-geometry.ts';
+import {deduplicate} from './vision.ts';
 const SIZE=704;
 export function decodeYolo(data:ArrayLike<number>,ratio:number,width:number,height:number,padX=0,padY=0):{detections:Detection[];basket:Point|null}{
   const detections:Detection[]=[];let basket:Point|null=null,basketConfidence=0;const anchors=data.length/8;
   for(let i=0;i<anchors;i++){
     let cls=0,confidence=data[4*anchors+i];
     for(let c=1;c<4;c++)if(data[(4+c)*anchors+i]>confidence){cls=c;confidence=data[(4+c)*anchors+i]}
-    if(cls===3||confidence<(cls===0?.18:cls===1?.35:.25))continue;
+    if(cls===3||confidence<(cls===0?.18:cls===1?.35:.15))continue;
     const cx=(data[i]-padX)/ratio,cy=(data[anchors+i]-padY)/ratio,w=data[2*anchors+i]/ratio,h=data[3*anchors+i]/ratio;
     const left=Math.max(0,Math.min(1,(cx-w/2)/width)),top=Math.max(0,Math.min(1,(cy-h/2)/height));
     const right=Math.max(0,Math.min(1,(cx+w/2)/width)),bottom=Math.max(0,Math.min(1,(cy+h/2)/height));
@@ -28,10 +30,12 @@ export function jerseyColor(pixels:Uint8ClampedArray,width:number,height:number,
   return channels.map(a=>a.length?a.sort((a,b)=>a-b)[Math.floor(a.length/2)]:0) as [number,number,number];
 }
 export async function loadYolo(){
-  const ort=await import('onnxruntime-web/wasm');ort.env.wasm.numThreads=1;ort.env.wasm.wasmPaths=new URL('/onnx/',window.location.href).href;
-  const session=await ort.InferenceSession.create('/models/ebard-yolov8n.onnx',{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+  const ort=await import('onnxruntime-web/webgpu');ort.env.wasm.numThreads=1;ort.env.wasm.wasmPaths=new URL('/onnx/',window.location.href).href;
+  let session:import('onnxruntime-web').InferenceSession;
+  try{session=await ort.InferenceSession.create('/models/ebard-yolov8n.onnx',{executionProviders:'gpu' in navigator?['webgpu','wasm']:['wasm'],graphOptimizationLevel:'all'});}
+  catch{session=await ort.InferenceSession.create('/models/ebard-yolov8n.onnx',{executionProviders:['wasm'],graphOptimizationLevel:'all'});}
   const c=document.createElement('canvas');c.width=SIZE;c.height=SIZE;const ctx=c.getContext('2d',{willReadFrequently:true})!;
-  return {async detect(image:HTMLCanvasElement){
+  async function infer(image:HTMLCanvasElement){
     const ratio=Math.min(SIZE/image.width,SIZE/image.height),rw=Math.round(image.width*ratio),rh=Math.round(image.height*ratio);
     const padX=Math.floor((SIZE-rw)/2),padY=Math.floor((SIZE-rh)/2);
     ctx.fillStyle='rgb(114,114,114)';ctx.fillRect(0,0,SIZE,SIZE);ctx.drawImage(image,padX,padY,rw,rh);
@@ -47,5 +51,22 @@ export async function loadYolo(){
         return {...result,detections:result.detections.map(d=>d.kind==='player'?{...d,jersey:jerseyColor(pixels,image.width,image.height,d.box)}:d)};
       }finally{for(const out of Object.values(output))out.dispose();}
     }finally{tensor.dispose();}
+  }
+  const tile=document.createElement('canvas');
+  const tileContext=tile.getContext('2d',{willReadFrequently:true})!;
+  return {async detect(image:HTMLCanvasElement,signal?:AbortSignal){
+    signal?.throwIfAborted();
+    const full=await infer(image);const detections=[...full.detections];
+    for(const crop of detectionCrops(image.width,image.height)){
+      signal?.throwIfAborted();tile.width=crop.width;tile.height=crop.height;
+      tileContext.drawImage(image,crop.x,crop.y,crop.width,crop.height,0,0,crop.width,crop.height);
+      const result=await infer(tile);
+      for(const d of result.detections){
+        if(d.confidence<(d.kind==='ball'?.28:.3))continue;
+        const restored=restoreCrop(d,crop,image.width,image.height);if(restored)detections.push(restored);
+      }
+    }
+    signal?.throwIfAborted();
+    return {...full,detections:deduplicate(detections)};
   }};
 }
